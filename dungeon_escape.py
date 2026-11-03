@@ -29,6 +29,7 @@ Level tiles (text grid, every row must be 20 characters, 13 rows)
   H  HIDDEN spike (kills) F  fake wall (walkable, looks solid)
   G  monster walking left/right (turns at ledges and walls)
   V  flying monster moving up/down
+  I  ice floor (歩くと滑る床)
 """
 import math
 import sys
@@ -57,12 +58,15 @@ JUMP_BUFFER = 0.10        # seconds a jump press is remembered before landing
 
 ENEMY_R = 12
 ENEMY_SPEED = 110
+ICE_ACCELERATION = 250     # 氷の上での加速度.低いと滑りやすい
+ICE_FRICTION = 10           # 摩擦の値。低いと滑りやすい
 
 BG = (10, 10, 18)
 SKY_A = (26, 26, 40)
 SKY_B = (30, 30, 46)
 WALL_C = (70, 70, 110)
 WALL_EDGE = (45, 45, 80)
+WALL_ICE = (188,226,232)
 WHITE = (235, 235, 245)
 RED = (225, 50, 50)
 GREEN = (90, 220, 130)
@@ -137,15 +141,15 @@ LEVELS = [
             "####################",
             "#..................#",
             "#..................#",
+            "#....#.............#",
+            "#....#.K...........#",
+            "#....#.............#",
+            "#....#S.G..........#",
+            "#....#IIIII........#",
             "#..................#",
-            "#..................#",
-            "#..................#",
-            "#..................#",
-            "#..................#",
-            "#..................#",
-            "#..................#",
-            "#P................E#",
-            "####################",
+            "#................DD#",
+            "#P...........H...DE#",
+            "####IIIIIIIIII######",
             "####################",
             ],
         },
@@ -234,7 +238,7 @@ class World:
     """One stage: tiles, player physics, monsters and all the rules."""
 
     def __init__(self, grid):
-        self.walls, self.fake_walls, self.doors = set(), set(), set()
+        self.walls, self.fake_walls, self.Ice_walls, self.doors = set(), set(), set(), set()
         self.keys, self.spikes, self.hidden = set(), set(), set()
         self.fake_exits = set()
         self.exit = None
@@ -248,6 +252,8 @@ class World:
                     self.walls.add(p)
                 elif ch == "F":
                     self.fake_walls.add(p)
+                elif ch == "I":
+                    self.Ice_walls.add(p)
                 elif ch == "D":
                     self.doors.add(p)
                 elif ch == "K":
@@ -270,6 +276,7 @@ class World:
                     self.py = (y + 1) * TILE - PLAYER_SIZE / 2
         # physics state
         self.vy = 0.0
+        self.vx = 0.0
         self.on_ground = False
         self.air_jumps = MAX_AIR_JUMPS
         self.coyote = 0.0
@@ -286,7 +293,7 @@ class World:
     def solid(self, tx, ty):
         if not (0 <= tx < COLS and 0 <= ty < ROWS):
             return True
-        return (tx, ty) in self.walls or (tx, ty) in self.doors
+        return (tx, ty) in self.walls or (tx, ty) in self.doors or (tx, ty) in self.Ice_walls
 
     def solid_px(self, x, y):
         return self.solid(math.floor(x / TILE), math.floor(y / TILE))
@@ -294,6 +301,16 @@ class World:
     def player_box(self):
         h = PLAYER_SIZE / 2
         return (self.px - h, self.py - h, self.px + h, self.py + h)
+
+    def on_ice(self):
+        """プレイヤーのX軸が氷床と重なっている間は氷床として扱う。"""
+        left_tx = math.floor((self.px - PLAYER_SIZE / 4) / TILE)
+        right_tx = math.floor((self.px + PLAYER_SIZE / 4) / TILE)
+        return any(
+            (tx, ty) in self.Ice_walls
+            for tx in (left_tx, right_tx)
+            for ty in range(ROWS)
+        )
 
     # ---- input -----------------------------------------------------------
     def jump_pressed(self):
@@ -367,10 +384,32 @@ class World:
                 self.air_jumps -= 1
                 self._do_jump()
 
-        # ---- horizontal, then vertical (with gravity)
+        # ---- 滑る床
+        target_vx = dirx * MOVE_SPEED
+        if self.on_ice():
+            if dirx:
+                # ゆっくりと加速
+                if self.vx < target_vx:
+                    self.vx = min(target_vx, self.vx + ICE_ACCELERATION * dt)
+                elif self.vx > target_vx:
+                    self.vx = max(target_vx, self.vx - ICE_ACCELERATION * dt)
+            else:
+                # 滑り続ける
+                if self.vx > 0:
+                    self.vx = max(0.0, self.vx - ICE_FRICTION * dt)
+                elif self.vx < 0:
+                    self.vx = min(0.0, self.vx + ICE_FRICTION * dt)
+        else:
+            if dirx:
+                self.vx = target_vx
+            else:
+                self.vx = 0.0
         if dirx:
             self.facing = dirx
-            self._move_axis(dirx * MOVE_SPEED * dt, 0)
+        if abs(self.vx) > 0:
+            hit = self._move_axis(self.vx * dt, 0)
+            if hit:
+                self.vx = 0.0
         self.vy = min(self.vy + GRAVITY * dt, MAX_FALL)
         dy = self.vy * dt
         self.on_ground = False
@@ -449,14 +488,17 @@ class Game:
             for x in range(COLS):
                 p = (x, y)
                 rect = pygame.Rect(ox + x * TILE, oy + y * TILE, TILE, TILE)
-                if p in w.walls or p in w.fake_walls:
+                if p in w.walls or p in w.fake_walls or p in w.Ice_walls:
                     pygame.draw.rect(self.screen, WALL_C, rect)
                     pygame.draw.rect(self.screen, WALL_EDGE, rect, 2)
                     if revealed and p in w.fake_walls:
                         pygame.draw.rect(self.screen, GREEN, rect, 2)
+                    if p in w.Ice_walls:
+                        pygame.draw.rect(self.screen, WALL_ICE, rect)
                     continue
-                pygame.draw.rect(self.screen,
-                                 SKY_A if (x + y) % 2 else SKY_B, rect)
+                
+
+                pygame.draw.rect(self.screen,SKY_A if (x + y) % 2 else SKY_B, rect)
                 c = rect.center
                 if p in w.doors:
                     pygame.draw.rect(self.screen, (140, 90, 40), rect.inflate(-4, 0))
